@@ -856,10 +856,8 @@ i2s i2s (
 	.sclk(I2S_BCK),
 	.lrclk(I2S_LRCK),
 	.sdata(I2S_DATA),
-//   .left_chan({SOUND_L, 4'd0}),
-//   .right_chan({SOUND_R, 4'd0})
-   .left_chan(SOUND_L),
-   .right_chan(SOUND_R),
+        .left_chan(SOUND_L),
+        .right_chan(SOUND_R),
 	.toggle_filter(st_filter)
 );
 
