@@ -110,6 +110,7 @@ localparam CONF_STR = {
 	"P1O3,Sync signals,Original,Filtered;",
 	"P1OK,Tape sound,Disabled,Enabled;",
 	"P1OL,Sound output,Stereo,Mono;",
+	"P1OP,Filter,Disabled,Enabled;",
 	"P1OO,Playcity,Disabled,Enabled;",
 	"P2OI,Joysticks swap,No,Yes;",
 	"P2OJ,Mouse,Disabled,Enabled;",
@@ -140,6 +141,7 @@ wire       st_mouse_en = status[19];
 wire       st_right_shift_mod = status[22];
 wire       st_keypad_mod = status[23];
 wire       st_playcity_ena = status[24];
+wire       st_filter = ~status[25];
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -818,25 +820,32 @@ mist_video #(.SD_HCNT_WIDTH(10), .OSD_X_OFFSET(10'd18)) mist_video (
 );
 
 //////////////////////////////////////////////////////////////////////
-wire [15:0] SOUND_L = ({1'b0, audio_l} + {1'b0, playcity_audio_l} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0)<< 3);
-wire [15:0] SOUND_R = ({1'b0, audio_r} + {1'b0, playcity_audio_r} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0)<< 3);
+//wire [9:0] SOUND_L = ({1'b0, audio_l} + {1'b0, playcity_audio_l} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0)<< 3);
+//wire [9:0] SOUND_R = ({1'b0, audio_r} + {1'b0, playcity_audio_r} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0)<< 3);
+wire [15:0] SOUND_L = ({1'b0, audio_l} + {1'b0, playcity_audio_l} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0) << 3);
+wire [15:0] SOUND_R = ({1'b0, audio_r} + {1'b0, playcity_audio_r} + (st_tape_sound ? {tape_rec, tape_play, 6'd0} :0) << 3);
+wire signed [15:0] DACinL, DACinR;
+//assign DACinL = SOUND_L;
+//assign DACinR = SOUND_R;
 
 
-sigma_delta_dac #(10) dac_l
-(
-	.CLK(clk_sys),
-	.RESET(reset),
-	.DACin(SOUND_L),
-	.DACout(AUDIO_L)
-);
-
-sigma_delta_dac #(10) dac_r
-(
-	.CLK(clk_sys),
-	.RESET(reset),
-	.DACin(SOUND_R),
-	.DACout(AUDIO_R)
-);
+//sigma_delta_dac #(10) dac_l
+//(
+//	.CLK(clk_sys),
+//	.RESET(reset),
+//	.DACin(SOUND_L),
+//	.DACout(AUDIO_L),
+//	.FILTER_EN(st_filter)
+//);
+//
+//sigma_delta_dac #(10) dac_r
+//(
+//	.CLK(clk_sys),
+//	.RESET(reset),
+//	.DACin(SOUND_R),
+//	.DACout(AUDIO_R),
+//	.FILTER_EN(st_filter)
+//);
 
 
 
@@ -850,7 +859,8 @@ i2s i2s (
 //   .left_chan({SOUND_L, 4'd0}),
 //   .right_chan({SOUND_R, 4'd0})
    .left_chan(SOUND_L),
-   .right_chan(SOUND_R)
+   .right_chan(SOUND_R),
+	.toggle_filter(st_filter)
 );
 
 //assign AUDIO_L = SOUND_L;
