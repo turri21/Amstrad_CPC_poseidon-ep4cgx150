@@ -1,6 +1,6 @@
 -=(Poseidon notes)=-
 
-Added Dandanator support (based on Manuel Teira's work of Calypso)
+Added Dandanator support (thanks to Manuel Teira / Calypso FPGA)
 
 Added Low Pass Filter in Video & Sound -> Filter Disabled / Enabled
 
