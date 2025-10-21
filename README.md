@@ -1,4 +1,6 @@
 -=(Poseidon notes)=-
+Added Dandanator support (based on Manuel Teira's work of Calypso)
+Added Low Pass Filter in Video & Sound -> Filter Disabled / Enabled
 
 Using [THE DUCK DAC](https://github.com/turri21/Amstrad_CPC_poseidon-ep4cgx150/blob/main/sigma_delta_dac.v)
 
