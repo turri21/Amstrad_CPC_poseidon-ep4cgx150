@@ -122,7 +122,7 @@ localparam CONF_STR = {
 	"P3OEF,Multiface 2,Enabled,Hidden,Disabled;",
 	"P3O6,CPU timings,Original,Fast;",
 	"P3OGH,FDC,Original,Fast,Disabled;",
-	"P3O5,Distributor,Amstrad,Schneider;",
+	"P3ORT,Distributor,Amstrad,Orion,Schneider,Awa,Solavox,Saisho,Triumph,Isp;",
 	"P3O4,Model,CPC 6128,CPC 664;",
 	"P3T0,Reset & apply model;",
 	"V,",`BUILD_DATE
@@ -135,7 +135,7 @@ wire       st_joyswap = status[18];
 wire       st_nowait = status[6];
 wire       st_cpc664 = status[4];
 wire       st_crtc = status[2];
-wire       st_distributor = status[5];
+wire [2:0] st_distributor = status[29:27];
 wire [1:0] st_fdc = status[17:16];
 wire       st_tape_sound = status[20];
 wire       st_stereo = ~status[21];
@@ -218,7 +218,7 @@ wire        ypbpr;
 wire        no_csync;
 
 
-user_io #(.STRLEN($size(CONF_STR)>>3)) user_io
+user_io #( .STRLEN(($size(CONF_STR)>>3)), .FEATURES(32'h0 | (BIG_OSD << 13) | (HDMI << 14))) user_io
 (
 	.clk_sys(clk_sys),
 	.clk_sd(clk_sys),
@@ -741,7 +741,7 @@ Amstrad_motherboard motherboard
 	.Fn(Fn),
 
 	.no_wait(st_nowait & ~tape_motor),
-	.ppi_jumpers({2'b11, ~st_distributor, 1'b1}),
+	.ppi_jumpers({1'b1, ~st_distributor}),
 	.crtc_type(~st_crtc),
 	.sync_filter(st_sync_filter),
 
@@ -868,7 +868,7 @@ color_mix color_mix
 	.R_out(R)
 );
 
-mist_video #(.SD_HCNT_WIDTH(10), .OSD_X_OFFSET(10'd18)) mist_video 
+mist_video #(.SD_HCNT_WIDTH(10), .OSD_X_OFFSET(10'd18), .BIG_OSD(BIG_OSD)) mist_video 
 (
 	.clk_sys     ( clk_sys    ),
 

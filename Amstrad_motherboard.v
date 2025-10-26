@@ -136,7 +136,7 @@ T80pa CPU
 	.busrq_n(1),
 	.int_n(INT_n & ~irq),
 	.nmi_n(~nmi),
-	.wait_n(ready | (IORQ_n & MREQ_n) | no_wait) // workaround a bug in T80pa: should wait only in memory or io cycles
+	.wait_n(ready | no_wait) // workaround a bug in T80pa: should wait only in memory or io cycles
 );
 
 wire        crtc_hs, crtc_vs, crtc_de;
