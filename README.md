@@ -4,6 +4,8 @@ Added Dandanator support (thanks to [Manuel Teira](https://github.com/teiram) / 
 
 Added Low Pass Filter in Video & Sound -> Filter Disabled / Enabled
 
+Added T80 update and Wait_n fix
+
 Using [THE DUCK DAC](https://github.com/turri21/Amstrad_CPC_poseidon-ep4cgx150/blob/main/sigma_delta_dac.v)
 
 # Amstrad CPC 6128 for MiST and MiSTer
