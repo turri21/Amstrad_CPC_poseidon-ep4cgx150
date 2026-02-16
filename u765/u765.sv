@@ -19,7 +19,7 @@
 //  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 //
 //============================================================================
-
+//`define U765_DEBUG 1
 //TODO:
 //GAP, CRC generation
 //WRITE DELETE should write the Deleted Address Mark to the SectorInfo
@@ -61,7 +61,15 @@ module u765 #(parameter CYCLES = 20'd4000, SPECCY_SPEEDLOCK_HACK = 0)
 
 //localparam OVERRUN_TIMEOUT = 26'd35000000;
 localparam OVERRUN_TIMEOUT = CYCLES;
-localparam [19:0] TRACK_TIME = CYCLES*8'd200;
+localparam [19:0] TRACK_TIME = CYCLES*8'd205;
+localparam [15:0] SECTOR_EXTRA_DATA_LEN = 61; // everything outside of DATA and GAP3 (SYNC, IDAM, ...)
+localparam [15:0] SECTOR_IDAM_POS = 21;
+localparam [15:0] SECTOR_IDAM_LENGTH = 9;
+localparam [15:0] SECTOR_SYNC1_START = 0;
+localparam [15:0] SECTOR_SYNC1_END = SECTOR_SYNC1_START + 8'd12;
+localparam [15:0] SECTOR_SYNC2_START = 43;
+localparam [15:0] SECTOR_SYNC2_END = SECTOR_SYNC2_START + 8'd12;
+localparam [15:0] SECTOR_DATA_START = 60;
 
 localparam UPD765_MAIN_D0B = 0;
 localparam UPD765_MAIN_D1B = 1;
@@ -75,9 +83,20 @@ localparam UPD765_MAIN_RQM = 7;
 localparam UPD765_SD_BUFF_TRACKINFO = 1'd0;
 localparam UPD765_SD_BUFF_SECTOR = 1'd1;
 
+`ifdef U765_DEBUG
+localparam SECTOR_SYNC1 = 0;
+localparam SECTOR_ID    = 1;
+localparam SECTOR_SYNC2 = 2;
+localparam SECTOR_DATA  = 3;
+localparam SECTOR_END   = 4;
+
 reg  [7:0] dbg_cmd /* synthesis noprune */;
 reg [21:0] chksum;
 reg [21:0] dbg_chksum /* synthesis noprune */;
+reg [11:0] dbg_mainread /* synthesis noprune */;
+reg  [7:0] dbg_mainstatus /* synthesis noprune */;
+reg  [2:0] dbg_sector_state[2][2] /* synthesis noprune */;
+`endif
 
 typedef enum
 {
@@ -258,6 +277,15 @@ reg  [7:0] m_data;    //data register
 
 assign dout = a0 ? m_data : m_status;
 
+function [15:0] SECTOR_SIZE;
+	input [3:0] n;
+	input [15:0] stored_size;
+	begin
+		reg [15:0] logical_size = (16'h80 << (n[3] ? 4'h8 : n[2:0]));
+		return (logical_size < stored_size ? logical_size : stored_size);
+	end
+endfunction
+
 always @(posedge clk_sys) begin : fdc
 
    //prefix internal CE protected registers with i_, so it's easier to write constraints
@@ -271,9 +299,10 @@ always @(posedge clk_sys) begin : fdc
 	reg       image_trackinfo_dirty[2];
 	reg       image_edsk[2]; //DSK - 0, EDSK - 1
 	reg [1:0] image_scan_state[2];
-	reg[19:0] i_rpm_time[2][2];
 	reg[19:0] i_steptimer[2], i_rpm_timer[2][2];
 	reg [3:0] i_step_state[2]; //counting cycles for steptimer
+	reg [7:0] i_byte_clk_cnt;
+	reg       i_byte_clk_en;
 
 	reg [7:0] i_current_track_sectors[2][2]; // sectors/track
 	reg [7:0] i_current_sector_pos[2][2]; //sector where the head currently positioned
@@ -281,6 +310,7 @@ always @(posedge clk_sys) begin : fdc
 	reg       i_secinfo_valid[2][2];
 	reg [7:0] ncn[2]; //new cylinder number
 	reg [7:0] pcn[2]; //present cylinder number
+	reg       disk_changed[2];
 	reg [2:0] next_weak_sector[2];
 	reg [2:0] seek_state[2];
 	reg       i_seek_start[2];
@@ -298,7 +328,10 @@ always @(posedge clk_sys) begin : fdc
 	reg [7:0] sector_n[2][2];      // N
 	reg [7:0] sector_st1[2][2];    // ST1
 	reg [7:0] sector_st2[2][2];    // ST2
+	reg [7:0] gap3[2][2];
 	reg[15:0] sector_length[2][2]; // Actual data length
+	reg[16:0] sector_byte_pos[2][2]; // Head position in the sector
+	reg[16:0] sector_end_pos[2][2]; // Head position of the end of the sector
 
 	reg old_wr, old_rd;
 	reg [7:0] i_track_size;
@@ -348,6 +381,7 @@ always @(posedge clk_sys) begin : fdc
 			image_size[i] <= img_size;
 			image_scan_state[i] <= {1'b0, |img_size};
 			image_ready[i] <= 0;
+			disk_changed[i] <= 1;
 			int_state[i] <= 0;
 			seek_state[i] <= 0;
 			i_seek_start[i] <= 0;
@@ -359,6 +393,14 @@ always @(posedge clk_sys) begin : fdc
 
 	if (ce) begin
 		i_current_drive <= ~i_current_drive;
+		if (i_current_drive) begin
+			i_byte_clk_cnt <= i_byte_clk_cnt + 1'd1;
+			i_byte_clk_en <= 0;
+			if (i_byte_clk_cnt == (CYCLES*32/1000-1)) begin// 32us/byte
+				i_byte_clk_cnt <= 0;
+				i_byte_clk_en <= 1;
+			end
+		end
 	end
 
    //Process the image file
@@ -439,6 +481,7 @@ always @(posedge clk_sys) begin : fdc
 		int_state <= '{ 0, 0 };
 		seek_state <= '{ 0, 0 };
 		i_seek_start <= '{ 0, 0 };
+		disk_changed <= '{ 0, 0 };
 		image_trackinfo_dirty <= '{ 1, 1 };
 		i_secinfo_valid <= '{ '{ 0, 0}, '{ 0, 0} };
 		image_track_offsets_wr <= 0;
@@ -466,7 +509,7 @@ always @(posedge clk_sys) begin : fdc
 					int_state[i_current_drive] <= 1;
 					seek_state[i_current_drive] <= 0; 
 				end else begin
-					image_trackinfo_dirty[i_current_drive] <= 1;
+					image_trackinfo_dirty[i_current_drive] <= 1;  // re-read trackinfo for the new track
 					if (fast) begin
 						pcn[i_current_drive] <= ncn[i_current_drive];
 					end else begin
@@ -491,7 +534,7 @@ always @(posedge clk_sys) begin : fdc
 			begin
 				$display("reload trackinfo: drive %d track %d", i_current_drive, pcn[i_current_drive]);
 				if (!tinfo_lock) begin
-					i_rpm_time[i_current_drive] <= '{ 0, 0 };
+					sector_byte_pos[i_current_drive] <= '{ 0, 0 };
 					i_current_track_sectors[i_current_drive] <= '{ 0, 0 };
 					next_weak_sector[i_current_drive] <= 0;
 					image_track_offsets_addr <= { i_current_drive, pcn[i_current_drive], 1'b0 };
@@ -519,7 +562,7 @@ always @(posedge clk_sys) begin : fdc
 
 			5:
 			if (!sd_busy_tinfo & sd_rd_tinfo == 2'b00) begin
-				tinfo_addr <= {image_track_offsets_in[0], 8'h15}; //number of sectors
+				tinfo_addr <= {image_track_offsets_in[0], 8'h16}; //gap3 length
 				tinfo_wait <= 1;
 				seek_state[i_current_drive] <= 6;
 			end else begin
@@ -528,15 +571,23 @@ always @(posedge clk_sys) begin : fdc
 
 			6:
 			if (!tinfo_wait) begin
+				gap3[i_current_drive][tinfo_hds] <= tinfo_data;
+				tinfo_addr <= {image_track_offsets_in[0], 8'h15}; //number of sectors
+				tinfo_wait <= 1;
+				seek_state[i_current_drive] <= 7;
+				i_secinfo_valid[i_current_drive][tinfo_hds] <= 0;
+			end
+
+			7:
+			if (!tinfo_wait) begin
 				i_current_track_sectors[i_current_drive][tinfo_hds] <= tinfo_data;
-				i_rpm_time[i_current_drive][tinfo_hds] <= tinfo_data ? TRACK_TIME/tinfo_data : CYCLES;
 
 				//assume the head position is at the start of a track after a seek
-				if (i_current_sector_pos[i_current_drive][tinfo_hds] >= tinfo_data)
+				if (i_current_sector_pos[i_current_drive][tinfo_hds] >= tinfo_data) begin
 					i_next_sector_pos[i_current_drive][tinfo_hds] <= 0;
-				else
+					i_rpm_timer[i_current_drive][tinfo_hds] <= 0;
+				end else
 					i_next_sector_pos[i_current_drive][tinfo_hds] <= i_current_sector_pos[i_current_drive][tinfo_hds];
-				i_secinfo_valid[i_current_drive][tinfo_hds] <= 0;
 
 				if (tinfo_hds == image_sides[i_current_drive]) begin
 					tinfo_lock <= 0;
@@ -595,7 +646,7 @@ always @(posedge clk_sys) begin : fdc
 			3:
 			if (~tinfo_wait) begin
 				if (tinfo_addr[7:0] == 8'h14) begin
-					if (!image_edsk[sector_search_ds0]) sector_length[sector_search_hds][sector_search_ds0] <= 8'h80 << tinfo_data[2:0];
+					if (!image_edsk[sector_search_ds0]) sector_length[sector_search_ds0][sector_search_hds] <= 16'h80 << tinfo_data[2:0];
 					tinfo_addr[7:0] <= 8'h18; //sector info list
 					tinfo_wait <= 1;
 				end else if (i_current_sector == 8'h1D && ~tinfo_addr[0]) begin
@@ -644,12 +695,14 @@ always @(posedge clk_sys) begin : fdc
 				tinfo_lock <= 0;
 				i_secinfo_valid[sector_search_ds0][sector_search_hds] <= 1;
 				i_current_sector_pos[sector_search_ds0][sector_search_hds] <= i_next_sector_pos[sector_search_ds0][sector_search_hds];
+				sector_end_pos[sector_search_ds0][sector_search_hds] <= SECTOR_SIZE(sector_n[sector_search_ds0][sector_search_hds], sector_length[sector_search_ds0][sector_search_hds]) + SECTOR_EXTRA_DATA_LEN - 1;
 				sector_search_state <= 0;
 			end else if (i_current_sector == i_current_track_sectors[sector_search_ds0][sector_search_hds] - 1) begin
 				$display("sector no. %d not found!", i_next_sector_pos[sector_search_ds0][sector_search_hds]);
 				//this shouldn't happen
 				i_secinfo_valid[sector_search_ds0][sector_search_hds] <= 1;
 				i_current_sector_pos[sector_search_ds0][sector_search_hds] <= i_next_sector_pos[sector_search_ds0][sector_search_hds];
+				sector_end_pos[sector_search_ds0][sector_search_hds] <= 0;
 				tinfo_lock <= 0;
 				sector_search_state <= 0;
 			end else begin
@@ -663,22 +716,52 @@ always @(posedge clk_sys) begin : fdc
 		//disk rotation
 		if (motor[i_current_drive]) begin
 			for (int i=0; i<2 ;i++) begin
-				if (i_rpm_timer[i_current_drive][i] >= i_rpm_time[i_current_drive][i] && i_rpm_time[i_current_drive][i] != 0) begin
-					i_rpm_timer[i_current_drive][i] <= 0;
-					i_secinfo_valid[i_current_drive][i] <= 0;
-					i_next_sector_pos[i_current_drive][i] <=
-						((i_current_sector_pos[i_current_drive][i] == i_current_track_sectors[i_current_drive][i] - 1'd1) ||
-						 (i_current_track_sectors[i_current_drive][i] == 0)) ?
-						8'd0 : i_current_sector_pos[i_current_drive][i] + 1'd1;
-				end else if (i_secinfo_valid[i_current_drive][i]) begin
+				if (i_secinfo_valid[i_current_drive][i])
 					i_rpm_timer[i_current_drive][i] <= i_rpm_timer[i_current_drive][i] + 1'd1;
+
+`ifdef U765_DEBUG
+				if (sector_byte_pos[i_current_drive][i] == SECTOR_SYNC1_START) dbg_sector_state[i_current_drive][i] <= SECTOR_SYNC1;
+				if (sector_byte_pos[i_current_drive][i] == SECTOR_IDAM_POS)    dbg_sector_state[i_current_drive][i] <= SECTOR_ID;
+				if (sector_byte_pos[i_current_drive][i] == SECTOR_SYNC2_START) dbg_sector_state[i_current_drive][i] <= SECTOR_SYNC2;
+				if (sector_byte_pos[i_current_drive][i] == SECTOR_DATA_START)  dbg_sector_state[i_current_drive][i] <= SECTOR_DATA;
+`endif
+
+				if (i_secinfo_valid[i_current_drive][i] & i_byte_clk_en) begin
+					sector_byte_pos[i_current_drive][i] <= sector_byte_pos[i_current_drive][i] + 1'd1;
+
+					if (sector_byte_pos[i_current_drive][i] >= (sector_end_pos[i_current_drive][i] + gap3[i_current_drive][i])) begin
+						if ((i_current_sector_pos[i_current_drive][i] == i_current_track_sectors[i_current_drive][i] - 1'd1) ||
+						 (i_current_track_sectors[i_current_drive][i] == 0))
+						begin
+							// end of last sector
+							if (i_rpm_timer[i_current_drive][i] >= TRACK_TIME) begin
+								// end of track after 200ms
+								i_next_sector_pos[i_current_drive][i] <= 0;
+								sector_byte_pos[i_current_drive][i] <= 0;
+								i_secinfo_valid[i_current_drive][i] <= 0;
+								i_rpm_timer[i_current_drive][i] <= 0;
+							end
+						end
+						else begin
+							i_next_sector_pos[i_current_drive][i] <= i_current_sector_pos[i_current_drive][i] + 1'd1;
+							sector_byte_pos[i_current_drive][i] <= 0;
+							i_secinfo_valid[i_current_drive][i] <= 0;
+						end
+					end
 				end
 			end
 		end
 
-		m_status[UPD765_MAIN_D0B] <= |seek_state[0];
-		m_status[UPD765_MAIN_D1B] <= |seek_state[1];
+		m_status[UPD765_MAIN_D0B] <= seek_state[0] == 1 | seek_state[0] == 2;
+		m_status[UPD765_MAIN_D1B] <= seek_state[1] == 1 | seek_state[0] == 2;
 		m_status[UPD765_MAIN_CB] <= state != COMMAND_IDLE;
+
+`ifdef U765_DEBUG
+		if (~old_rd & rd & ~a0) begin
+			dbg_mainread <= dbg_mainread + 1'd1;
+			dbg_mainstatus <= m_status;
+		end
+`endif
 
 		case(state)
 			COMMAND_IDLE:
@@ -691,7 +774,10 @@ always @(posedge clk_sys) begin : fdc
 					//i_mfm <= din[6];
 					i_sk <= din[5];
 
+`ifdef U765_DEBUG
 					dbg_cmd <= din;
+					dbg_mainread <= 0;
+`endif
 
 					i_substate <= 0;
 					casez (din[7:0])
@@ -757,13 +843,14 @@ always @(posedge clk_sys) begin : fdc
 			COMMAND_SENSE_DRIVE_STATUS_RD:
 			if (~old_rd & rd & a0) begin
 				m_data <= { 1'b0,
-							ready[ds0] & image_wp[ds0],         //write protected
-							available[ds0],                     //ready
+							(ready[ds0] & image_wp[ds0]) | disk_changed[ds0], //bit6:WP (also "disc changed" latch)
+							available[ds0],//ready
 							image_ready[ds0] & !pcn[ds0],       //track 0
 							image_ready[ds0] & image_sides[ds0],//two sides
 							image_ready[ds0] & hds,             //head address
 							1'b0,                               //us1
 							ds0 };                              //us0
+				disk_changed[ds0] <= 0;
 				state <= COMMAND_IDLE;
 			end
 
@@ -842,15 +929,29 @@ always @(posedge clk_sys) begin : fdc
 			end
 
 			COMMAND_READ_ID_WAIT_ID:
-			if (!image_trackinfo_dirty[ds0]) begin
+			if (!image_trackinfo_dirty[ds0] & i_byte_clk_en) begin
+/*
+				if (sector_byte_pos[ds0][hds] == SECTOR_SYNC2_START) begin
+					m_status[UPD765_MAIN_EXM] <= 0;
+					m_status[UPD765_MAIN_DIO] <= 0;
+				end
+*/
+				if (sector_byte_pos[ds0][hds] == SECTOR_SYNC1_END || sector_byte_pos[ds0][hds] == SECTOR_SYNC2_END + 1) begin
+					m_status[UPD765_MAIN_EXM] <= 1;
+					m_status[UPD765_MAIN_DIO] <= 1;
+				end
 				if (i_current_track_sectors[ds0][hds] == 0) begin
 					//empty track
+					i_sector_c <= pcn[ds0];
+					i_sector_h <= {7'd0, hds};
+					i_sector_r <= 8'h00;
+					i_sector_n <= 8'h00;
 					status[0] <= 8'h40;
 					status[1] <= 8'b101;
 					status[2] <= 0;
 					state <= COMMAND_READ_RESULTS;
-				end else if (i_rpm_timer[ds0][hds] < (i_rpm_time[ds0][hds] >> 4) && i_secinfo_valid[ds0][hds]) begin
-					// should wait for the ID field on the disc
+				end else if (sector_byte_pos[ds0][hds] == (SECTOR_IDAM_POS + SECTOR_IDAM_LENGTH) && i_secinfo_valid[ds0][hds]) begin
+					// now after the ID
 					i_sector_c <= sector_c[ds0][hds];
 					i_sector_h <= sector_h[ds0][hds];
 					i_sector_r <= sector_r[ds0][hds];
@@ -918,8 +1019,21 @@ always @(posedge clk_sys) begin : fdc
 				if (!image_trackinfo_dirty[ds0] && !tinfo_lock) begin
 					m_status[UPD765_MAIN_DIO] <= ~i_write;
 					if (i_rtrack) i_r <= 0;
-					i_bc <= 1;
-					state <= COMMAND_RW_DATA_EXEC2;
+					// If the current track is empty/unformatted (or intentionally treated as empty),
+					// do not enter the sector scan/data state machine. Return an error immediately.
+					if (i_current_track_sectors[ds0][hds] == 0) begin
+						i_sector_c <= i_c;
+						i_sector_h <= i_h;
+						i_sector_r <= i_r;
+						i_sector_n <= i_n;
+						status[0] <= 8'h40;
+						status[1] <= 8'h05; // missing address mark + no data
+						status[2] <= 8'h00;
+						state <= COMMAND_READ_RESULTS;
+					end else begin
+						i_bc <= 1;
+						state <= COMMAND_RW_DATA_EXEC2;
+					end
 				end
 			end
 
@@ -932,7 +1046,7 @@ always @(posedge clk_sys) begin : fdc
 
 			//process trackInfo + sectorInfo
 			COMMAND_RW_DATA_EXEC3:
-			if (i_secinfo_valid[ds0][hds]) begin
+			if (i_secinfo_valid[ds0][hds] && i_byte_clk_en) begin
 				i_sector <= i_current_sector_pos[ds0][hds];
 
 				if (i_sector != i_current_sector_pos[ds0][hds]) begin
@@ -948,12 +1062,11 @@ always @(posedge clk_sys) begin : fdc
 				end
 
 				if ((i_current_sector_pos[ds0][hds] == i_current_track_sectors[ds0][hds] - 1) &&
-				    (i_rpm_timer[ds0][hds] == i_rpm_time[ds0][hds] >> 1) &&
-					  (ds0 == i_current_drive)) begin
+				    (sector_byte_pos[ds0][hds] == (sector_end_pos[ds0][hds] + gap3[ds0][hds] - 1)) &&
+					(ds0 == i_current_drive)) begin
 					$display("passed index mark, pass: %d", i_scanning);
 					// passed index mark
 					if (i_scanning) begin
-						m_status[UPD765_MAIN_EXM] <= 0;
 						//sector not found or end of track
 						status[0] <= i_rtrack ? 8'h00 : 8'h40;
 						status[1] <= i_rtrack ? 8'h00 : 8'h04;
@@ -961,8 +1074,8 @@ always @(posedge clk_sys) begin : fdc
 						state <= COMMAND_READ_RESULTS;
 					end else
 						i_scanning <= 1;
-				end else if (i_rpm_timer[ds0][hds] == i_rpm_time[ds0][hds] >> 2) begin
-					// at ID field, let's go to compare requested and actual fields
+				end else if (sector_byte_pos[ds0][hds] == (SECTOR_IDAM_POS + SECTOR_IDAM_LENGTH)) begin
+					// after the ID field, let's go to compare requested and actual fields
 					i_sector_c <= sector_c[ds0][hds];
 					i_sector_h <= sector_h[ds0][hds];
 					i_sector_r <= sector_r[ds0][hds];
@@ -984,12 +1097,14 @@ always @(posedge clk_sys) begin : fdc
 				if (i_sk & ~i_rtrack & (i_rw_deleted ^ i_sector_st2[6])) begin
 					state <= COMMAND_RW_DATA_EXEC8;
 				end else begin
-					$display("sector found r/R : %d/%d rpm_timer: %d/%d", i_r, i_sector_r, i_rpm_timer[ds0][hds], i_rpm_time[ds0][hds]);
-					i_bytes_to_read <= i_n ? (8'h80 << (i_n[3] ? 4'h8 : i_n[2:0])) : i_dtl;
+					$display("sector found r/R : %d/%d pos: %d", i_r, i_sector_r, sector_byte_pos[ds0][hds]);
+					i_bytes_to_read <= i_n ? SECTOR_SIZE(i_n, 16'hFFFF) : i_dtl;
 					i_timeout <= OVERRUN_TIMEOUT;
 					m_status[UPD765_MAIN_EXM] <= 1;
 					i_weak_sector <= 0;
+`ifdef U765_DEBUG
 					chksum <= 0;
+`endif
 					state <= COMMAND_RW_DATA_EXEC_WEAK;
 				end
 			end else begin
@@ -1046,13 +1161,12 @@ always @(posedge clk_sys) begin : fdc
 					end
 					state <= COMMAND_RW_DATA_EXEC8;
 				end else if (!i_timeout) begin
-					m_status[UPD765_MAIN_EXM] <= 0;
 					status[0] <= 8'h40;
 					status[1] <= 8'h10; //overrun
 					status[2] <= i_sector_st2 | (i_rw_deleted ? 8'h40 : 8'h0);
 					state <= COMMAND_READ_RESULTS;
 				end else if (~m_status[UPD765_MAIN_RQM]) begin
-					m_status[UPD765_MAIN_RQM] <= 1;
+					/*if (i_byte_clk_en)*/ m_status[UPD765_MAIN_RQM] <= 1;
 				end else if (~i_write & ~old_rd & rd & a0 & ~buff_wait) begin
 					if (&buff_addr) begin
 						//sector continues on the next LBA
@@ -1065,7 +1179,10 @@ always @(posedge clk_sys) begin : fdc
 								i_sector_st1[5] & i_sector_st2[5] & !i_bytes_to_read[14:4]) ?
 						 buff_data_in << next_weak_sector[ds0] : buff_data_in;
 
+`ifdef U765_DEBUG
 					chksum <= chksum + buff_data_in;
+`endif
+
 					m_status[UPD765_MAIN_RQM] <= 0;
 					if (i_sector_size) begin
 						i_sector_size <= i_sector_size - 1'd1;
@@ -1114,19 +1231,22 @@ always @(posedge clk_sys) begin : fdc
 
 			//End of reading/writing sector, what's next?
 			COMMAND_RW_DATA_EXEC8:
-			if (!sd_busy_sector & sd_rd_sector == 2'b00 & sd_wr_sector == 2'b00) begin
+			if (!sd_busy_sector && sd_rd_sector == 2'b00 && sd_wr_sector == 2'b00 && 
+			    sector_byte_pos[ds0][hds] >= (sector_end_pos[ds0][hds] + (gap3[ds0][hds]>>2))) // in GAP3
+
+			begin
+`ifdef U765_DEBUG
 				dbg_chksum <= chksum;
+`endif
 				if (~i_rtrack & ~(i_sk & (i_rw_deleted ^ i_sector_st2[6])) &
 					((i_sector_st1[5] & i_sector_st2[5]) | (i_rw_deleted ^ i_sector_st2[6]))) begin
 					//deleted mark or crc error
-					m_status[UPD765_MAIN_EXM] <= 0;
 					status[0] <= 8'h40;
 					status[1] <= i_sector_st1;
 					status[2] <= i_sector_st2 | (i_rw_deleted ? 8'h40 : 8'h0);
 					state <= COMMAND_READ_RESULTS;
 				end else	if ((i_rtrack ? i_sector : i_sector_r) == i_eot) begin
 					//end of cylinder
-					m_status[UPD765_MAIN_EXM] <= 0;
 					status[0] <= i_rtrack ? 8'h00 : 8'h40;
 					status[1] <= 8'h80;
 					status[2] <= (i_rw_deleted ^ i_sector_st2[6]) ? 8'h40 : 8'h0;
@@ -1181,7 +1301,6 @@ always @(posedge clk_sys) begin : fdc
 
 			COMMAND_FORMAT_TRACK5:
 			if (!i_sc) begin
-				m_status[UPD765_MAIN_EXM] <= 0;
 				status[0] <= 0;
 				status[1] <= 0;
 				status[2] <= 0;
@@ -1292,6 +1411,7 @@ always @(posedge clk_sys) begin : fdc
 			begin
 				m_status[UPD765_MAIN_RQM] <= 1;
 				m_status[UPD765_MAIN_DIO] <= 1;
+				m_status[UPD765_MAIN_EXM] <= 0;
 				if (~old_rd & rd & a0) begin
 					case (i_substate)
 						0: begin
